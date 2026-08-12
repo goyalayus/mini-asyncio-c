@@ -41,14 +41,42 @@ The additional `ready_refs` counter is manual C lifetime management. Python
 normally keeps queued callback arguments alive through object reference
 counting.
 
+### `02-timers.c`
+
+Adds delayed, one-shot callback scheduling:
+
+```text
+call_later(delay, callback, argument) -> timer min-heap
+                                                |
+                         nearest deadline becomes epoll timeout
+                                                |
+                         expired timer enters the ready queue
+```
+
+Important properties:
+
+- deadlines use `CLOCK_MONOTONIC`, so wall-clock changes cannot move timers
+- the heap root always contains the earliest deadline
+- existing ready work forces a zero-millisecond poll
+- no ready work and no timers allows an infinite poll
+- timer callbacks use the same FIFO execution path as I/O callbacks
+- three startup timers, inserted out of order, visibly demonstrate heap order
+
+The ready FIFO and timer heap are both defined directly in `02-timers.c`.
+There are no generated types or container dependencies, so the entire stage
+can be read and navigated as one self-contained file.
+
+This corresponds to asyncio's `_scheduled` heap, `call_later()`, `call_at()`,
+and the timeout/timer portions of `BaseEventLoop._run_once()`.
+
 ## Build and run
 
 The code uses Linux `epoll`. On Linux:
 
 ```sh
 cc -std=c11 -Wall -Wextra -Wpedantic -Werror \
-  -o mini-ready 01-ready-queue.c
-./mini-ready 1
+  -o mini-timers 02-timers.c
+./mini-timers 1
 ```
 
 On macOS, build and run it in Docker:
@@ -68,6 +96,15 @@ Expected response:
 
 ```text
 hi 1
+```
+
+Without any network activity, stage 2 also prints timers in deadline order,
+not insertion order:
+
+```text
+timer 250 ms fired after 250 ms
+timer 600 ms fired after 600 ms
+timer 1000 ms fired after 1000 ms
 ```
 
 Run the parallel connection test:

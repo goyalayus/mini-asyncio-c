@@ -69,14 +69,62 @@ can be read and navigated as one self-contained file.
 This corresponds to asyncio's `_scheduled` heap, `call_later()`, `call_at()`,
 and the timeout/timer portions of `BaseEventLoop._run_once()`.
 
+### `03-read-future.c`
+
+Moves exact-length read completion out of the application handler and into a
+one-shot Future embedded in `recv_operation`:
+
+```text
+recv_exact(100) -> Future pending -> EPOLLIN retries read()
+                                  -> Future finishes at 100 bytes
+                                  -> request callback enters ready queue
+```
+
+The Future stores either a result or an error and schedules its done callback
+through `call_soon_owned()`. The ready handle keeps the connection alive until
+that callback has run. Writes remain callback-driven in this checkpoint so the
+read-side integration can be studied independently.
+
+### `04-final-async-server.c`
+
+The compact, integrated version. One generic `Task` drives a manually written
+coroutine object, and every suspension point yields a `Future`:
+
+```text
+client coroutine -> await read_exact(100)
+                 -> await sleep(10ms)
+                 -> await write("hi N\n")
+```
+
+For this one concrete client coroutine, the connection itself is its frame: it
+contains the instruction pointer and all state that must survive suspension.
+The generic Task only knows how to resume that frame and await the Future it
+yields. Separate client Tasks run concurrently on one OS thread. The reactor
+uses level-triggered epoll, matching CPython's Linux selector path; the
+nonblocking operation is still attempted immediately before waiting again.
+
+### `05-final-async-server.cpp`
+
+Rewrites the integrated server with ordinary C++ classes while keeping the
+async machinery explicit and local to this repository:
+
+- `EventLoop` owns epoll, the ready queue, and the timer priority queue
+- `Future` stores completion and schedules its waiter
+- `Task` resumes a `Coroutine` and connects it to the yielded `Future`
+- `Connection` is the coroutine frame and contains the explicit client state
+
+This checkpoint does not use Boost.Asio, C++20 coroutines, or another async
+runtime. The `await` result, task stepping, suspension, resumption, readiness
+registration, and state machine are all implemented in the file.
+
 ## Build and run
 
 The code uses Linux `epoll`. On Linux:
 
 ```sh
-cc -std=c11 -Wall -Wextra -Wpedantic -Werror \
-  -o mini-timers 02-timers.c
-./mini-timers 1
+c++ -std=c++17 -Wall -Wextra -Wpedantic -Werror \
+  -o mini-final-cpp 05-final-async-server.cpp
+./mini-final-cpp
 ```
 
 On macOS, build and run it in Docker:
